@@ -1,7 +1,9 @@
-// Usage: sqasm < file.in > file.out
 // Oleg Mazonka: 10 Nov 2006; 22 Jan 2009; 11 Sept 2009
+// Modifications by Vort
 
 #include <iostream>
+#include <fstream>
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <map>
@@ -11,11 +13,19 @@ using namespace std;
 
 int error_status = 0;
 
-int str2int(const string & s)
+int str2int(const string &s, int size)
 {
-    int ret = 0;
-    sscanf(s.c_str(), "%d", &ret);
-    return ret;
+    long long maxInt = size == 4 ? 0x100000000 : 0x100;
+
+    long long x;
+    if (s.length() >= 2 && s[1] == 'x')
+        x = strtoll(s.c_str() + 2, nullptr, 16);
+    else
+        x = strtoll(s.c_str(), nullptr, 10);
+    if (x < maxInt)
+        return (int)x;
+    else
+        throw 0;
 }
 
 string int2str(int x, int pr = 0)
@@ -41,33 +51,36 @@ const   := ( number | 'letter' | ? )
 
 struct item
 {
+    int size;
     int addr;
     string s;
     int i;
     enum { EMPTY, STR, RES } state;
-    item() : state(EMPTY) {}
-    string dump(bool = false);
+    item(int size) : state(EMPTY), size(size) {}
+    void dump(ofstream& out);
 };
 
-string item::dump(bool extra)
+void item::dump(ofstream& out)
 {
-    string r;
-    if ( extra ) r = int2str(addr) + ":";
-    if ( state == RES ) return r + int2str(i);
-    return r + string("#") + s;
+    if (state == RES)
+        out.write((char*)&i, size);
+    else
+    {
+        cerr << "Unresolved symbol '" << s << "'\n";
+        throw 0;
+    }
 }
 
 struct instruction
 {
     vector<item> items;
-    string dump(bool = false);
+    void dump(ofstream& out);
 };
 
-string instruction::dump(bool extra)
+void instruction::dump(ofstream& out)
 {
-    string r;
-    for ( size_t i = 0; i < items.size(); i++ ) r += items[i].dump(extra) + ' ';
-    return r;
+    for (size_t i = 0; i<items.size(); i++)
+        items[i].dump(out);
 }
 
 map<string, int> lab2adr;
@@ -162,8 +175,15 @@ bool getconst(item & i)
     }
 
     if ( !isdigit(prog[pip]) ) return false;
-    while ( pip < prog.size() && isdigit(prog[pip]) ) i.s += prog[pip++];
-    i.i = str2int(i.s);
+    while (
+        pip<prog.size() &&
+        (
+            isdigit(prog[pip]) ||
+            prog[pip] == 'x' ||
+            (prog[pip] >= 'A' && prog[pip] <= 'F') ||
+            (prog[pip] >= 'a' && prog[pip] <= 'f')
+            )) i.s += prog[pip++];
+    i.i = str2int(i.s, i.size);
     i.state = item::RES;
     return true;
 }
@@ -210,7 +230,7 @@ tryterm:
     if ( prog[pip] == '-' )
     {
         pip++;
-        item j;
+        item j(i.size);
         getterm(j);
         if ( j.state == item::RES && i.state == item::RES ) i.i -= j.i;
         else
@@ -226,7 +246,7 @@ tryterm:
     if ( prog[pip] == '+' )
     {
         pip++;
-        item j;
+        item j(i.size);
         getterm(j);
         if ( j.state == item::RES && i.state == item::RES ) i.i += j.i;
         else
@@ -234,6 +254,22 @@ tryterm:
             if ( i.state == item::RES ) i.s = int2str(i.i);
             if ( j.state == item::RES ) j.s = int2str(j.i);
             i.s = i.s + "+" + j.s;
+            i.state = item::STR;
+        }
+        goto tryterm;
+    }
+
+    if (prog[pip] == '*')
+    {
+        pip++;
+        item j(i.size);
+        getterm(j);
+        if (j.state == item::RES && i.state == item::RES) i.i *= j.i;
+        else
+        {
+            if (i.state == item::RES) i.s = int2str(i.i);
+            if (j.state == item::RES) j.s = int2str(j.i);
+            i.s = i.s + "*" + j.s;
             i.state = item::STR;
         }
         goto tryterm;
@@ -312,12 +348,12 @@ begin:
     }
 
     eat();
-    i.addr = addr++;
+    i.addr = addr += i.size;
 
     if ( prog[pip] == '"' )
     {
         if ( getStr(i) ) return true;
-        addr--; // finished with string - try again
+        addr -= i.size; // finished with string - try again
         goto begin;
     }
 
@@ -330,11 +366,13 @@ bool getinstr(instruction & i)
 {
     eatn();
     bool data = false;
-    if ( prog[pip] == '.' ) { data = true; pip++; }
+    int itemSize = 4;
+    if (prog[pip] == '.') { data = true; pip++; }
+    if (prog[pip] == '!') { data = true; pip++; itemSize = 1; }
     while ( pip < prog.size() )
     {
         sint pip0 = pip;
-        item t;
+        item t(itemSize);
         if ( getitem(t) ) i.items.push_back(t);
         else if ( i.items.size() == 0 ) continue;
         else break;
@@ -342,7 +380,7 @@ bool getinstr(instruction & i)
         if ( pip0 == pip && t.state == item::STR && t.s.empty() )
             throw string() + "Syntax error";
 
-        if ( i.items.size() > 100000 )
+        if ( i.items.size() > 10000000 )
             throw string() + "Sqasm (I): instruction size hardcoded limit exceeded."
             " This is an artificial limit added for security purposes."
             " Remove the limit inside the compiler if necessary.";
@@ -359,14 +397,14 @@ bool getinstr(instruction & i)
     if ( !data && i.items.size() == 1 )
     {
         item k = i.items.front();
-        k.addr = addr++;
+        k.addr = addr += itemSize;
         i.items.push_back(k);
     }
 
     if ( !data && i.items.size() == 2 )
     {
-        item k;
-        k.addr = addr++;
+        item k(itemSize);
+        k.addr = addr += itemSize;
         k.i = addr;
         k.state = item::RES;
         i.items.push_back(k);
@@ -400,7 +438,7 @@ void resolve(item & i)
 
     prog = i.s;
     pip = 0;
-    item k;
+    item k(i.size);
     getitem(k);
     if ( k.state == item::RES )
     {
@@ -427,25 +465,33 @@ void resolve(vector<instruction> & pr)
     }
 }
 
-int main()
+int main(int argc, char *argv[])
 try
 {
+    if (argc != 3)
+    {
+        cout << "usage: sqasm input_file.asq output_file.sqb" << endl;
+        return 0;
+    }
+
+    ifstream ifs(argv[1]);
     while (1)
     {
         string s;
-        getline(cin, s);
+        getline(ifs, s);
         prog += s + '\n';
-        if ( !cin ) break;
+        if (!ifs) break;
     }
 
     vector<instruction> pr = program();
 
     if ( error_status ) return error_status;
 
+    ofstream ofs(argv[2], ofstream::out | ofstream::binary);
     for ( size_t i = 0; i < pr.size(); i++ )
     {
         resolve(pr[i]);
-        cout << pr[i].dump() << "\n";
+        pr[i].dump(ofs);
     }
 
     if ( unres.size() )
