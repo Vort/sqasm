@@ -67,7 +67,7 @@ void item::dump(ofstream& out)
     else
     {
         cerr << "Unresolved symbol '" << s << "'\n";
-        throw 0;
+        exit(-1);
     }
 }
 
@@ -468,11 +468,13 @@ void resolve(vector<instruction> & pr)
 int main(int argc, char *argv[])
 try
 {
-    if (argc != 3)
+    if (argc != 4)
     {
-        cout << "usage: sqasm input_file.asq output_file.sqb" << endl;
+        cout << "usage: sqasm input_file.asq output_file.sqb base_addr" << endl;
         return 0;
     }
+
+    addr = stoi(argv[3]);
 
     ifstream ifs(argv[1]);
     while (1)
